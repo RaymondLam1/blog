@@ -1,0 +1,55 @@
+
+name: 部署文档
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write # 允许读写仓库内容，是推送代码所必需的
+  pages: write    # 允许写入 GitHub Pages
+  id-token: write # 用于 Pages 部署流程的身份验证
+
+jobs:
+  deploy-gh-pages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # 如果你文档需要 Git 子模块，取消注释下一行
+          # submodules: true
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: |
+          corepack enable
+          npm ci
+
+      - name: 安装 doc search
+        run: npm i -D @vuepress/plugin-docsearch
+
+      - name: 构建文档
+        env:
+          NODE_OPTIONS: --max_old_space_size=8192
+        run: |-
+          npm run docs:build
+          > src/.vuepress/dist/.nojekyll
+
+      - name: 部署文档
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          # 部署文档
+          token: ${{ vars.BLOG_TOKEN }}
+          branch: master
+          folder: src/.vuepress/dist
+          repository-name: RaymondLam1/RaymondLam1.github.io
+
+
