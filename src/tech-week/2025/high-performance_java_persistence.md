@@ -2077,7 +2077,9 @@ Hibernate 会延迟数据库连接的获取，直到当前事务需要执行其�
 
 对于 JTA 事务，默认模式可能过于严格，因为并非所有 Java EE 应用服务器在管理事务资源方面的行为都相同。因此，检查数据库连接是否可以在触发连接获取事件的 EJB 组件之外关闭非常重要。基于 Spring 的企业系统不使用 Enterprise Java Beans，即使使用独立的 JTA 事务管理器，after_transaction 连接释放模式也可能完全适用。
 
-after_statement 模式会带来一些性能损失，这与频繁的连接获取/释放周期有关。因此，以下测试测量了在 Spring 应用程序上下文中使用 Bitronix 时连接获取的开销。每个事务都会执行相同的语句（获取当前时间戳），执行次数由 x 轴表示。y 轴记录了 after_statement 和 after_transaction 两种连接释放模式下的事务响应时间。
+after_statement 模式会频繁地获取和释放连接，这显然会带来一定的性能开销。因此，以下测试测量了在 Spring 应用程序上下文中使用 Bitronix 时连接获取的开销。每个事务都会执行相同的语句（获取当前时间戳），执行次数由 x 轴表示。y 轴记录了 after_statement 和 after_transaction 两种连接释放模式下的事务响应时间。
+
+![alt text](assets/high-performance_java_persistence/image-32.png)
 
 事务执行的语句越多，从底层连接池重新获取相关数据库连接的开销就越大。为了更好地展示连接获取的开销，测试运行了多达 10,000 条语句，尽管这个数字对于典型的 OLTP 事务来说可能过高。
 
@@ -2089,4 +2091,224 @@ after_transaction 连接释放模式比默认的 JTA after_statement 策略更�
 JTA 和 JDBC 事务
 
 https://cloud.tencent.com/developer/article/1786161
+:::
+
+## 8.3 监控连接
+
+如前所述，使用外部配置的 DataSource 是首选方案，因为实际的 DataSource 可以通过连接池、监控和日志记录功能进行增强。FlexyPool 的工作原理也正是如此，下图展示了 DataSource 的代理机制：
+
+![alt text](assets/high-performance_java_persistence/image-33.png)
+
+数据访问层获取的不是实际的 DataSource 实例，而是其代理引用。该代理会拦截连接获取和释放请求，从而监控连接的使用情况。
+
+在使用 Spring 时，设置 FlexyPool 相当简单，因为应用程序可以完全控制 DataSource 的配置。
+
+在 Java EE 中，数据库连接应始终从托管的 DataSource 获取。集成 FlexyPool 的一种简单方法是扩展默认的 DatasourceConnectionProviderImpl，并将原始 DataSource 替换为 FlexyPoolDataSource。
+
+因此，FlexyPool 提供了以下 Hibernate 连接提供程序：
+
+``` java
+public class FlexyPoolHibernateConnectionProvider
+    extends DatasourceConnectionProviderImpl {
+
+    private transient FlexyPoolDataSource<DataSource> flexyPoolDataSource;
+
+    @Override 
+    public void configure(Map props) {
+        super.configure(props);
+        flexyPoolDataSource = new FlexyPoolDataSource<>(getDataSource());
+    }
+
+    @Override 
+    public Connection getConnection() throws SQLException {
+        return flexyPoolDataSource.getConnection();
+    }
+
+    @Override 
+    public boolean isUnwrappableAs(Class unwrapType) {
+        return super.isUnwrappableAs(unwrapType) ||
+            getClass().isAssignableFrom(unwrapType);
+    }
+
+    @Override 
+    public void stop() {
+        flexyPoolDataSource.stop();
+        super.stop();
+    }
+}
+```
+
+要使用 FlexyPoolHibernateConnectionProvider，应用程序必须配置 hibernate.connection.provider_class 属性：
+
+``` property
+<property 
+ name="hibernate.connection.provider_class" 
+ value="com.vladmihalcea.flexypool.adaptor.FlexyPoolHibernateConnectionProvider"
+/>
+```
+
+### 8.3.1 Hibernate 统计信息
+
+Hibernate 内置了一个统计信息收集器，用于收集与数据库连接、Session 事务甚至二级缓存使用情况相关的通知。StatisticsImplementor 接口定义了拦截各种 Hibernate 内部事件的契约：
+
+![alt text](assets/high-performance_java_persistence/image-34.png)
+
+Hibernate 可以代表用户收集各种各样的指标，但出于性能考虑，统计机制默认是禁用的。
+
+要启用统计信息收集机制，必须首先配置以下属性：
+
+``` property
+<property name="hibernate.generate_statistics" value="true"/>
+```
+
+启用统计信息收集后，要将统计信息打印到当前应用程序日志中，必须设置以下日志记录器配置：
+
+``` property
+<logger 
+    name="org.hibernate.engine.internal.StatisticalLoggingSessionEventListener"
+    level="info" />
+```
+
+完成以上两项设置后，每当 Hibernate Session（持久化上下文）结束时，当前运行的日志中就会显示以下报告。
+
+```
+37125102 nanoseconds spent acquiring 10000 JDBC connections;
+25521714 nanoseconds spent releasing 10000 JDBC connections;
+95242323 nanoseconds spent preparing 10000 JDBC statements;
+923615040 nanoseconds spent executing 10000 JDBC statements;
+```
+
+默认的统计信息收集器仅统计特定回调方法的调用次数，如果这不能满足需求，应用程序开发人员可以提供自己的自定义 StatisticsImplementor 实现。
+
+::: info
+
+Dropwizard Metrics
+
+在高吞吐量的事务系统中，需要记录的指标数据量可能非常庞大，因此将所有这些值存储在内存中是完全不切实际的。
+
+为了减少内存占用，Dropwizard Metrics 项目采用了各种蓄水池采样策略，这些策略要么使用固定大小的采样器，要么使用基于时间的采样窗口。
+
+Dropwizard Metrics 不仅支持多种指标类型（例如计时器、直方图、计数器），还可以使用多种报告通道（例如 SLF4J、JMX、Ganglia、Graphite）。
+
+鉴于以上种种原因，使用像 Dropwizard Metrics 这样成熟的框架比从头开始构建自定义实现要好得多。
+
+:::
+
+#### 8.3.1.1 自定义统计信息
+
+虽然内置的指标信息相当丰富，但 Hibernate 并不局限于默认的统计信息收集机制，该机制可以完全自定义。
+
+在接下来的示例中，统计信息收集器还提供以下指标：
+
+物理事务时间的分布（从首次获取连接到释放连接的时间间隔）
+
+在任何给定事务的生命周期内，连接获取请求次数的直方图（由于使用了 after_statement 释放模式）。
+
+StatisticsReport 类在 Dropwizard Metrics 的基础上提供了指标存储和报告生成功能：
+
+``` java
+
+ public class StatisticsReport {
+
+    private final Logger LOGGER = LoggerFactory.getLogger(getClass());
+
+    private MetricRegistry metricRegistry = new MetricRegistry();
+
+    private Histogram connectionCountHistogram = metricRegistry.
+        histogram("connectionCountHistogram");
+
+    private Timer transactionTimer = metricRegistry.
+        timer("transactionTimer");
+
+    private Slf4jReporter logReporter = Slf4jReporter
+            .forRegistry(metricRegistry)
+            .outputTo(LOGGER)
+            .build();
+
+    public void transactionTime(long nanos) {
+        transactionTimer.update(nanos, TimeUnit.NANOSECONDS);
+    }
+
+    public void connectionsCount(long count) {
+        connectionCountHistogram.update(count);
+    }
+
+    public void generate() {
+        logReporter.report();
+    }
+}
+
+```
+
+StatisticsImplementor 接口定义了 Hibernate 内部 API 与各种自定义统计信息收集实现之间的契约。为简化起见，以下 StatisticsImplementor 接口实现扩展了默认的 ConcurrentStatisticsImpl 类，因为它只需要重写 connect 和 endTransaction 方法。
+
+``` java
+ public class TransactionStatistics extends ConcurrentStatisticsImpl {
+
+    private static final ThreadLocal<AtomicLong> startNanos = 
+    	ThreadLocal.withInitial(AtomicLong::new);
+
+    private static final ThreadLocal<AtomicLong> connectionCounter = 
+    	ThreadLocal.withInitial(AtomicLong::new);
+
+    private StatisticsReport report = new StatisticsReport();
+
+    @Override
+    public void connect() {
+        connectionCounter.get().incrementAndGet();
+        startNanos.get().compareAndSet(0, System.nanoTime());
+        super.connect();
+    }
+
+    @Override
+    public void endTransaction(boolean success) {
+        try {
+            report.transactionTime(System.nanoTime() - startNanos.get().get());
+            report.connectionsCount(connectionCounter.get().get());
+            report.generate();
+        } finally {
+            startNanos.remove();
+            connectionCounter.remove();
+        }
+        super.endTransaction(success);
+    }
+}
+```
+
+StatisticsImplementor 是一个单例实例，因此在事务结束后必须重置 ThreadLocal 计数器。事务结束时，会生成报告，并将物理事务时间和特定事务期间发出的连接请求次数记录到日志中。
+
+由于持久化上下文可以运行多个并发事务，因此报告会在每个事务结束时生成。
+
+要使用自定义的 StatisticsImplementor 实例，Hibernate 需要在配置属性中提供一个 StatisticsFactory。StatisticsImplementor 的构建过程会接收一个 SessionFactoryImplementor 参数，因此也可以访问 Hibernate 的配置数据。
+
+``` java
+public class TransactionStatisticsFactory implements StatisticsFactory {   
+    @Override public StatisticsImplementor buildStatistics(
+        SessionFactoryImplementor sessionFactory) {
+        return new TransactionStatistics();
+    }
+}
+```
+
+hibernate.stats.factory 配置属性必须包含 StatisticsFactory 实现类的完全限定名：
+
+``` property
+<property name="hibernate.stats.factory" value="com.vladmihalcea.book.hpjp.hibernate\
+.statistics.TransactionStatisticsFactory" />
+```
+
+当将之前的 JTA 连接释放模式示例与此自定义统计信息收集器一起运行时，会显示以下输出：
+
+```
+type=HISTOGRAM, name=connectionCounterHistogram, count=107, 
+min=1, max=10000, mean=162.41, stddev=1096.69, 
+median=1.0, p75=1.0, p95=50.0, p98=1000.0, p99=5000.0, p999=10000.0
+
+type=TIMER, name=transactionTimer, count=107, 
+min=0.557524, max=1272.75, mean=27.16, stddev=152.57, 
+median=0.85, p75=1.24, p95=41.25, p98=283.50, p99=856.19, p999=1272.75, 
+mean_rate=36.32, rate_unit=events/second, duration_unit=milliseconds
+```
+::: info
+对于高性能数据访问层而言，统计信息和指标是必不可少的。Hibernate 统计机制是一个非常强大的工具，可以帮助开发团队更好地了解 Hibernate 的内部工作原理。
 :::
