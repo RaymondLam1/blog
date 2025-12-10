@@ -2312,3 +2312,160 @@ mean_rate=36.32, rate_unit=events/second, duration_unit=milliseconds
 ::: info
 对于高性能数据访问层而言，统计信息和指标是必不可少的。Hibernate 统计机制是一个非常强大的工具，可以帮助开发团队更好地了解 Hibernate 的内部工作原理。
 :::
+
+## 8.4 语句日志记录
+
+ORM 工具可以自动生成 DML 语句，但应用程序开发人员有责任验证这些语句的有效性和整体性能影响。将 SQL 语句验证推迟到数据访问层出现性能问题时才进行是存在风险的，甚至会影响开发成本。因此，从应用程序开发的早期阶段开始，SQL 语句日志记录就变得至关重要。
+
+在实现业务逻辑时，“完成定义”应该包含对所有相关数据访问层操作的审查。遵循此规则可以在企业系统部署到生产环境时节省大量麻烦。
+
+尽管 JPA 2.1 没有用于记录 SQL 语句的标准配置属性，但大多数 JPA 实现都通过特定于框架的设置支持此功能。为此，Hibernate 定义了以下配置属性：
+
+表 8.4：连接释放模式
+
+| 属性 | 描述 |
+| :--- | :--- |
+| `hibernate.show_sql` | 将 SQL 语句打印到控制台 |
+| | |
+| `hibernate.format_sql` | 在记录或打印到控制台之前格式化 SQL 语句 |
+| | |
+| `hibernate.use_sql_comments` | 在自动生成的 SQL 语句中添加注释 |
+
+使用系统控制台进行日志记录是一种不好的做法，日志框架（例如 Logback 或 Log4j）是更好的选择，因为它支持可配置的附加器和日志级别。
+
+::: info
+由于 hibernate.show_sql 属性会将日志打印到控制台，因此应避免使用它。
+:::
+
+Hibernate 会在 org.hibernate.SQL 日志记录层次结构中以调试级别记录所有 SQL 语句。
+
+要启用语句日志记录，必须将以下 Logback 日志记录器添加到相应的配置文件中：
+
+``` property
+<logger name="org.hibernate.SQL" level="debug"/>
+```
+
+由于 Hibernate 仅使用 PreparedStatement，因此在将语句打印到日志时，无法获取绑定参数值：
+``` property
+INSERT INTO post (title, version, id) VALUES (?, ?, ?)
+```
+
+### 8.4.1 语句格式化
+
+默认情况下，每条 SQL 语句（无论多长）都以单行文本的形式写入。为了提高可读性，Hibernate 可以将 SQL 语句转换为跨越多行日志的可读格式。可以通过设置以下配置属性来激活此功能：
+``` property
+<property name="hibernate.format_sql" value="true" />
+```
+
+启用此设置后，之前的语句可以格式化如下：
+
+``` property
+ insert 
+    into
+        post
+        (title, version, id) 
+    values
+        (?, ?, ?)
+```
+
+虽然格式化语句可以提高可读性，但此设置仅适用于开发阶段。在生产系统中，日志通常会在集中式系统中进行解析和聚合，而多行语句格式可能会影响日志解析机制。聚合后，可以在应用程序性能监控用户界面中显示之前对记录的查询进行格式化。
+
+::: info
+
+hibernate.format_sql 属性仅适用于日志记录的语句，并且不会传递到底层的 JDBC 驱动程序（SQL 语句仍然以单行文本的形式发送）。
+
+因此，当通过外部 DataSource 代理记录语句时，语句格式化不会产生任何效果。
+:::
+
+### 8.4.2 语句级注释
+
+除了格式化之外，Hibernate 还可以通过在语句主体中添加 SQL 级注释来解释语句生成过程。此功能使应用程序开发人员能够更好地理解以下过程：
+* 触发当前执行语句的实体状态转换
+* 选择连接以获取给定结果集的原因
+* 当前语句使用的显式锁定机制
+
+默认情况下，Hibernate 不会在自动生成的语句中添加任何 SQL 注释。要启用此机制，必须配置以下 Hibernate 属性：
+
+``` property
+<property name="hibernate.use_sql_comments" value="true" />
+```
+
+持久化 Post 实体时，Hibernate 会通过以下注释解释与此特定语句相关的实体状态转换：
+
+```
+/* insert com.vladmihalcea.book.hpjp.util.providers.BlogEntityProvider$Post
+“*/ 
+INSERT INTO post (title, version, id) VALUES (?, ?, ?)
+```
+
+::: info
+与 SQL 语句格式化不同，SQL 注释不仅在日志记录期间生成，还会传播到底层驱动程序。虽然这种技术可能对调试很有用，但在生产环境中，最好禁用它，以减少数据库请求的网络开销。
+:::
+
+### 8.4.3 日志记录参数
+
+必须对 JDBC 驱动程序或 DataSource 进行代理，才能拦截语句执行并记录实际参数值。除了语句日志记录之外，JDBC 代理还可以提供其他横切功能，例如长时间运行查询检测或自定义语句执行监听器。
+
+#### 8.4.3.1 DataSource-proxy
+
+DataSource-proxy 是一个鲜为人知的 JDBC 日志记录框架，它支持自定义 JDBC 语句执行监听器。在 Java EE 中，并非所有应用服务器都允许配置外部 DataSource，因为它们依赖于自己的自定义实现来绑定用户提供的 JDBC 驱动程序。由于 DataSource-proxy 只能装饰 DataSource，因此它可能不适用于所有 Java EE 环境。
+
+![alt text](assets/high-performance_java_persistence/image-35.png)
+
+另一方面，其程序化配置支持与大多数现代 Spring 应用程序采用的基于 Java 的配置方法相契合：
+
+``` java
+@Bean 
+public DataSource dataSource() {
+    SLF4JQueryLoggingListener loggingListener = new
+SLF4JQueryLoggingListener();
+    loggingListener.setQueryLogEntryCreator(new InlineQueryLogEntryCreator());
+    return ProxyDataSourceBuilder
+        .create(actualDataSource())
+        .name(DATA_SOURCE_PROXY_NAME)
+        .listener(loggingListener)
+        .build();
+}
+```
+
+在以下示例中，DataSource-proxy 用于记录三个 PreparedStatement 的批量插入操作。虽然通常批量操作会打印在日志的一行中，但为了适应当前页面布局，输出被拆分成了多行。
+
+```
+Name:DATA_SOURCE_PROXY, Time:6, Success:True, 
+Type:Prepared, Batch:True, QuerySize:1, BatchSize:3, 
+Query:["insert into post (title, version, id) values (?, ?, ?)"], 
+Params:[(Post no. 0, 0, 0), (Post no. 1, 0, 1), (Post no. 2, 0, 2)]
+```
+
+现在不仅可以看到绑定参数值，而且由于它们被分组在一起，因此也很容易可视化批量处理机制。
+
+::: info
+借助自定义语句监听器支持，DataSource-proxy 可以构建查询计数验证器，以断言自动生成的语句数量，从而在开发阶段防止 N+1 查询问题。
+:::
+
+#### 8.4.3.2 P6Spy
+
+P6Spy 发布于 2002 年，当时 J2EE 应用服务器统治着企业系统领域。由于 Java EE 应用服务器不允许程序化配置 DataSource，因此 P6Spy 支持声明式配置方法（通过 spy.properties 文件）。
+
+P6Spy 支持代理 JDBC 驱动程序（适用于 Java EE 应用程序）或 JDBC 数据源（某些 Java EE 容器支持，也是 Spring 企业应用程序的常用做法）。
+
+![alt text](assets/high-performance_java_persistence/image-36.png)
+
+运行前面的示例会得到以下输出（已应用格式）：
+```
+p6spy - 1448122491807|0|batch|connection 7|
+	insert into post (title, version, id) values (?, ?, ?)|
+	insert into post (title, version, id) values ('Post no. 0', 0, 0)
+p6spy - 1448122491807|0|batch|connection 7|
+	insert into post (title, version, id) values (?, ?, ?)|
+	insert into post (title, version, id) values ('Post no. 1', 0, 1)
+p6spy - 1448122491807|0|batch|connection 7|
+	insert into post (title, version, id) values (?, ?, ?)|
+	insert into post (title, version, id) values ('Post no. 2', 0, 2)
+p6spy - 1448122491812|5|statement|connection 7|
+	insert into post (title, version, id) values (?, ?, ?)|
+	insert into post (title, version, id) values ('Post no. 2', 0, 2)
+```
+输出按事件发生的顺序排列，包含以下列：
+
+
