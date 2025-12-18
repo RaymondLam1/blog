@@ -2599,3 +2599,283 @@ Java String 可以占用与 Java 堆可用内存一样多的内存。
 由于存在不同的时区、闰秒和夏令时规则，处理时间非常棘手。通常的做法是将时间戳存储为 UTC（协调世界时），并在数据层进行时区转换。
 :::
 
+### 9.1.4 数字类型
+
+Oracle 可以表示最多 38 位的数字，因此只能使用 BigInteger 或 BigDecimal 类型（java.lang.Long 和 java.lang.Double 只能存储最多 8 个字节）。
+
+**Table 9.4: Numeric Types**
+
+| Hibernate type  | JDBC type | Java type    |
+|-----------------|-----------|--------------|
+| BigIntegerType  | NUMERIC   | BigInteger   |
+| BigDecimalType  | NUMERIC   | BigDecimal   |
+
+### 9.1.5 二进制类型
+
+对于二进制类型，大多数数据库系统提供多种存储选项（例如 RAW、VARBINARY、BYTEA、BLOB、CLOB）。
+在 Java 中，数据访问层可以使用字节数组、JDBC Blob 或 Clob，甚至可以使用可序列化类型，前提是 Java 对象在保存到数据库之前已进行序列化。
+
+**Table 9.5: Binary Types**
+
+| Hibernate type          | JDBC type       | Java type                |
+|-------------------------|-----------------|--------------------------|
+| BinaryType              | VARBINARY       | byte[], Byte[]           |
+| BlobType                | BLOB            | Blob                     |
+| ClobType                | CLOB            | Clob                     |
+| NClobType               | NCLOB           | Clob                     |
+| MaterializedBlobType    | BLOB            | byte[], Byte[]           |
+| ImageType               | LONGVARBINARY   | byte[], Byte[]           |
+| SerializableType        | VARBINARY       | Serializable             |
+| SerializableToBlobType  | BLOB            | Serializable             |
+
+### 9.1.6 UUID 类型
+
+有多种方法可以持久化 Java UUID（通用唯一标识符），根据内存占用情况，最有效的存储类型是特定于数据库的 UUID 列类型。
+
+**Table 9.6: UUID Types**
+
+| Hibernate type     | JDBC type | Java type |
+|--------------------|-----------|-----------|
+| UUIDBinaryType     | BINARY    | UUID      |
+| UUIDCharType       | VARCHAR   | UUID      |
+| PostgresUUIDType   | OTHER     | UUID      |
+
+::: info
+如果数据库不原生支持 UUID 类型，则 BINARY 类型比 VARCHAR 类型占用更少的字节，因此关联的索引也占用更少的内存空间。
+:::
+
+### 9.1.7 其他类型
+
+Hibernate 还可以映射 Java 枚举类型、Class、URL、Locale 和 Currency 类型。
+
+**Table 9.7: Other Types**
+
+| Hibernate type | JDBC type                                                   | Java type    |
+|----------------|-------------------------------------------------------------|--------------|
+| EnumType       | CHAR, LONGVARCHAR, VARCHAR                                  | Enum         |
+| EnumType       | INTEGER, NUMERIC, SMALLINT, TINYINT, BIGINT, DECIMAL, DOUBLE, FLOAT | Enum         |
+| ClassType      | VARCHAR                                                     | Class        |
+| CurrencyType   | VARCHAR                                                     | Currency     |
+| LocaleType     | VARCHAR                                                     | Locale       |
+| UrlType        | VARCHAR                                                     | URL          |
+
+### 9.1.8 自定义类型
+
+PostgreSQL 不仅拥有丰富的内置数据类型，还允许添加自定义类型（使用 CREATE DOMAIN DDL 语句）。为每个领域模型字段选择合适的数据库类型可以显著提升数据访问性能。尽管 PostgreSQL 提供了多种内置类型，但应用程序开发人员并不局限于这些现有的类型，可以轻松添加新的类型。
+
+在以下示例中，业务逻辑需要监控企业应用程序的访问情况。为此，数据访问层存储每个登录用户的 IP（Internet Protocol）地址。
+
+假设此内部应用程序仅使用 IPv4 协议，则 IP 地址以无类别域间路由 (CIDR) 格式存储（例如 192.168.123.231/24）。PostgreSQL 可以使用 cidr 或 inet 类型存储 IPv4 地址，也可以使用 VARCHAR(18) 列类型。
+
+VARCHAR(18) 列需要 18 个字符，假设使用 UTF-8 编码，每个 IPv4 地址最多需要 18 个字节。
+最小的地址（例如 0.0.0.0/0）需要 9 个字符，因此 VARCHAR(18) 方法每个 IPv4 地址需要 9 到 18 个字符。
+
+inet 类型专为 IPv4 和 IPv6 网络地址设计，它还支持各种网络地址专用运算符（例如 <、>、&&）以及其他地址转换函数（例如 host(inet)、netmask(inet)）。与 VARCHAR(18) 方法不同，inet 类型每个 IPv4 地址仅需要 7 个字节。
+
+由于其更紧凑的存储空间（索引可以更好地放入内存）并支持许多专用运算符，inet 类型是一个更具吸引力的选择。虽然 Hibernate 默认不支持 inet 类型，但添加自定义 Hibernate 类型是一项简单的任务。 IPv4 地址被封装在自己的包装器中，该包装器还可以定义各种地址操作函数。
+
+
+``` java
+
+public class IPv4 implements Serializable {
+
+    private final String address;
+
+    public IPv4(String address) {
+        this.address = address;
+    }
+
+    public String getAddress() {
+        return address;
+    }
+
+    @Override public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        return Objects.equals(address, IPv4.class.cast(o).address);
+    }
+
+    @Override public int hashCode() {
+        return Objects.hash(address);
+    }
+
+    public InetAddress toInetAddress() throws UnknownHostException {
+        return Inet4Address.getByName(address);
+    }
+}
+
+```
+
+当实体需要更改 IPv4 字段时，必须提供一个新的对象实例。由于不可变类型的内部状态在当前运行的持久化上下文中不会发生变化，因此处理起来更加简便。
+
+所有自定义类型都必须实现 UserType 接口，并且由于 ImmutableType 负责处理大多数 UserType 的实现细节，因此 IPv4Type 可以专注于特定类型的转换逻辑。
+
+``` java
+public class IPv4Type extends ImmutableType<IPv4> {
+
+    public IPv4Type() {
+        super(IPv4.class);
+    }
+
+    @Override public int[] sqlTypes() { return new int[]{ Types.OTHER}; }
+
+    @Override public IPv4 get(ResultSet rs, String[] names,
+        SessionImplementor session, Object owner) throws SQLException {
+        String ip = rs.getString(names[0]);
+        return (ip != null) ? new IPv4(ip) : null;
+    }
+
+    @Override public void set(PreparedStatement st, IPv4 value, int index,
+        SessionImplementor session) throws SQLException {
+        if (value == null) {
+            st.setNull(index, Types.OTHER);
+        } else {
+            PGobject holder = new PGobject();
+            holder.setType("inet");
+            holder.setValue(value.getAddress());
+            st.setObject(index, holder);
+        }
+    }
+}
+```
+
+get() 方法用于将 inet 字段映射到 IPv4 对象实例，而 set() 方法用于将 IPv4 对象转换为 PostgreSQL JDBC 驱动程序对应的 inet 类型。
+
+::: info
+Types.OTHER 用于映射 JDBC 不支持的数据库类型。
+:::
+
+::: java
+
+public abstract class ImmutableType<T> implements UserType {
+    private final Class<T> clazz;
+    
+    protected ImmutableType(Class<T> clazz) { this.clazz = clazz; }
+
+    @Override public Object nullSafeGet(ResultSet rs, String[] names,
+        SessionImplementor session, Object owner) throws SQLException {
+        return get(rs, names, session, owner);
+    }
+
+    @Override public void nullSafeSet(PreparedStatement st, Object value, 
+        int index, SessionImplementor session) throws SQLException {
+        set(st, clazz.cast(value), index, session);
+    }
+
+    @Override public Class<T> returnedClass() { return clazz; }
+
+    @Override public boolean equals(Object x, Object y) { 
+        return Objects.equals(x, y); 
+    }
+
+    @Override public int hashCode(Object x) { return x.hashCode(); }
+
+    @Override public Object deepCopy(Object o) { return o; }
+
+    @Override public boolean isMutable() { return false; }
+
+    @Override public Serializable disassemble(Object o) { 
+        return (Serializable) o; 
+    }
+
+    @Override public Object assemble(Serializable o, Object owner) { return o; }
+
+    @Override 
+    public Object replace(Object o, Object target, Object owner) { return o; }
+    
+    protected abstract T get(ResultSet rs, String[] names,
+        SessionImplementor session, Object owner) throws SQLException;
+
+    protected abstract void set(PreparedStatement st, T value, int index,
+        SessionImplementor session) throws SQLException;
+}
+:::
+
+@Type 注解指示 Hibernate 使用 IPv4Type 来映射 IPv4 字段。
+
+``` java
+@Entity
+public class Event {
+
+    @Id @GeneratedValue
+    private Long id;
+
+    @Type(type = "com.vladmihalcea.book.hpjp.hibernate.type.IPv4Type")
+    @Column(name = "ip", columnDefinition = "inet")
+    private IPv4 ip;
+
+    public Event() {}
+
+    public Event(String address) {
+        this.ip = new IPv4(address);
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public IPv4 getIp() {
+        return ip;
+    }
+
+    public void setIp(String address) {
+        this.ip = new IPv4(address);
+    }
+}
+```
+
+::: info
+GiST 运算符
+
+PostgreSQL 9.4 添加了对 inet 和 cidr 列类型的 GiST 运算符支持。要启用此功能，必须在相应的 inet 列上创建使用 inet_ops 运算符类的 GiST 索引。
+
+CREATE INDEX ON event USING gist (ip inet_ops)
+:::
+
+当 Hibernate 负责底层类型转换时，管理事件就变得非常简单。
+
+::: java
+final AtomicReference<Event> eventHolder = new AtomicReference<>();
+
+doInJPA(entityManager -> {
+    entityManager.persist(new Event());
+    Event event = new Event("192.168.0.231");
+    entityManager.persist(event);
+    eventHolder.set(event);
+});
+
+doInJPA(entityManager -> {
+    Event event = entityManager.find(Event.class, eventHolder.get().getId());
+    event.setIp("192.168.0.123");
+});
+:::
+
+运行前面的示例会生成以下 SQL 语句：
+
+::: sql
+INSERT INTO event (ip, id) VALUES (NULL(OTHER), 1)
+INSERT INTO event (ip, id) VALUES (`192.168.0.231`, 2)
+
+SELECT e0_.id as id1_0_0_, e0_.ip as ip2_0_0_ 
+FROM event e0_ 
+WHERE e0_.id = 2
+
+UPDATE event SET ip=`192.168.0.123` WHERE id = 2
+:::
+
+使用特定于数据库的类型的一大优势是可以访问高级查询功能。由于 GiST 索引支持 inet_ops 运算符，因此可以使用以下查询来检查是否为给定子网生成了事件：
+
+::: java
+Event matchingEvent = (Event) entityManager.createNativeQuery(
+    "SELECT e.* " +
+    "FROM event e " +
+    "WHERE " +
+    "   e.ip && CAST(:network AS inet) = TRUE", Event.class)
+.setParameter("network", "192.168.0.1/24")
+.getSingleResult();
+
+assertEquals("192.168.0.123", matchingEvent.getIp().getAddress());
+:::
+
+
+
