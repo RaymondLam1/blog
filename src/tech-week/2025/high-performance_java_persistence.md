@@ -2532,3 +2532,70 @@ UML 定义的组合关联关系是实体与可嵌入类型之间关系的完美�
 由于缺少标识符，可嵌入对象无法由持久化上下文管理，其状态由其父实体控制。
 
 由于类型和标识符会对应用程序的整体性能产生重大影响，本章的其余部分将更详细地讨论这些内容。
+
+## 9.1 类型
+
+对于每种受支持的数据库类型，JDBC 都定义了一个 java.sql.JDBCType 枚举。
+由于 Hibernate 构建在 JDBC 之上，因此它负责在 JDBC 类型及其对应的 Java 类型（基本类型或对象类型）之间进行映射。
+
+### 9.1.1 基本类型
+
+| Hibernate type        | JDBC type                     | Java type              |
+|-----------------------|-------------------------------|------------------------|
+| BooleanType           | BIT                           | boolean, Boolean       |
+| NumericBooleanType    | INTEGER (e.g. 0, 1)           | boolean, Boolean       |
+| TrueFalseType         | CHAR (e.g. 'F', 'f', 'T', 't') | boolean, Boolean       |
+| YesNoType             | CHAR (e.g. 'N', 'n', 'Y', 'y') | boolean, Boolean       |
+| ByteType              | TINYINT                       | byte, Byte             |
+| ShortType             | SMALLINT                      | short, Short           |
+| CharacterType         | CHAR                          | char, Character        |
+| CharacterNCharType    | NCHAR                         | char, Character        |
+| IntegerType           | INTEGER                       | int, Integer           |
+| LongType              | BIGINT                        | long, Long             |
+| FloatType             | FLOAT                         | float, Float           |
+| DoubleType            | DOUBLE                        | double, Double         |
+| CharArrayType         | VARCHAR                       | char[], Character[]    |
+
+从一个数据库系统到另一个数据库系统，布尔类型可以表示为 BIT、BYTE、BOOLEAN 或 CHAR 数据库类型，
+因此定义了四种类型来解析布尔基本类型。
+
+只有非空数据库列才能映射到 Java 基本类型（boolean、byte、short、char、int、long、float、double）。
+对于可空列的映射，最好使用相应的基本类型包装类（Boolean、Byte、Short、Character、Integer、Long、Float、Double）。
+
+### 9.1.2 字符串类型
+
+Java String 可以占用与 Java 堆可用内存一样多的内存。
+另一方面，数据库系统定义了有限大小的类型（VARCHAR 和 NVARCHAR）以及无限大小的类型（TEXT、NTEXT、BLOB 和 NCLOB）。
+
+为了解决这种映射差异，Hibernate 定义了以下类型：
+
+| Hibernate type         | JDBC type     | Java type |
+|------------------------|---------------|-----------|
+| StringType             | VARCHAR       | String    |
+| StringNVarcharType     | NVARCHAR      | String    |
+| TextType               | LONGVARCHAR   | String    |
+| NTextType              | LONGNVARCHAR  | String    |
+| MaterializedClobType   | CLOB          | String    |
+| MaterializedNClobType  | NCLOB         | String    |
+
+### 9.1.3 日期和时间类型
+
+在处理时间方面，Java 和数据库都有多种表示方式，这解释了 Hibernate 中存在大量与时间相关的类型。
+
+**Table 9.3: Date and Time Types**
+
+| Hibernate type      | JDBC type | Java type                      |
+|---------------------|-----------|--------------------------------|
+| DateType            | DATE      | Date                           |
+| TimeType            | TIME      | Time                           |
+| TimestampType       | TIMESTAMP | Timestamp, Date                |
+| DbTimestampType     | TIMESTAMP | Timestamp, Date                |
+| CalendarType        | TIMESTAMP | Calendar, GregorianCalendar    |
+| CalendarDateType    | DATE      | Calendar, GregorianCalendar    |
+| CalendarTimeType    | TIME      | Calendar, GregorianCalendar    |
+| TimeZoneType        | VARCHAR   | TimeZone                       |
+
+::: info
+由于存在不同的时区、闰秒和夏令时规则，处理时间非常棘手。通常的做法是将时间戳存储为 UTC（协调世界时），并在数据层进行时区转换。
+:::
+
