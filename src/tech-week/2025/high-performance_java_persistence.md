@@ -2974,3 +2974,139 @@ UUIDBinaryType 将 java.util.UUID 转换为字节数组，并存储在关联的 
 :::
 
 Hibernate 还可以代表应用程序开发人员生成 UUID 标识符，如下两节所述。
+
+### 9.2.2 传统 UUID 生成器
+
+UUID 十六进制生成器以 `uuid` 名称注册，并生成十六进制 UUID 字符串表示形式。该 UUID 十六进制生成器使用 8-8-4-8-4 的十六进制数字布局，不符合 RFC 4122 标准，后者使用 8-4-4-4-12 的十六进制数字格式。以下代码片段展示了 UUIDHexGenerator 的映射及其关联的插入语句。
+
+``` java
+@Entity @Table(name = "post")
+public class Post {
+
+    @Id @Column(columnDefinition = "CHAR(32)")
+    @GeneratedValue(generator = "uuid")
+    @GenericGenerator(name = "uuid", strategy = "uuid")
+    private String id;
+}
+```
+
+#### 9.2.2.1 新的 UUID 生成器
+
+新的 UUID 生成器符合 RFC 4122 标准（变体 2），并以 `uuid2` 名称注册（可与 java.lang.UUID、byte[] 和 String 域模型对象类型一起使用）。与之前的用例相比，映射和测试用例如下所示：
+
+``` java
+@Entity @Table(name = "post")
+public class Post {
+
+    @Id @Column(columnDefinition = "BINARY(16)")
+    @GeneratedValue(generator = "uuid2")
+    @GenericGenerator(name = "uuid2", strategy = "uuid2")
+    private UUID id;
+}
+
+INSERT INTO post (id) VALUES 
+([77, 2, 31, 83, -45, -98, 70, 40, -65, 40, -50, 30, -47, 16, 30, 124])”
+
+```
+
+::: info
+由于符合 RFC 4122 标准且能够与 BINARY 列类型一起使用，因此 UUIDGenerator 比传统的 UUIDHexGenerator 更受推荐。
+:::
+
+### 9.2.3 数字标识符
+
+如前所述，通常首选数字代理键，因为它占用空间更少，并且索引对于顺序标识符的性能更好。为了生成数字标识符，大多数数据库系统提供标识列（或 auto_increment）或序列对象。
+
+JPA 定义了 GenerationType 枚举，用于所有支持的标识符生成器类型：
+
+* IDENTITY 用于将实体标识符映射到数据库标识列。
+
+* SEQUENCE 通过调用给定的数据库序列来分配标识符。
+
+* TABLE 用于不支持序列的关系数据库（例如 MySQL 5.7），表生成器通过使用单独的表来模拟数据库序列。
+
+* AUTO 根据当前数据库方言决定标识符生成策略。
+
+::: info
+正如在 JDBC 部分中所解释的，数据库序列更适合批量更新，并且允许各种应用程序端的优化技术。
+:::
+
+#### 9.2.3.1 标识符生成器
+
+Oracle 12c、SQL Server 和 MySQL（AUTO_INCREMENT）都支持标识列类型（包含在 SQL:2003 标准中），它允许对 INTEGER 或 BIGINT 类型的列进行自动递增。
+
+由于它使用轻量级锁定机制，而不是更重量级的事务粗粒度锁，因此递增过程非常高效。唯一的缺点是，新分配的值只能在执行实际的插入语句后才能得知。
+
+::: info
+批量更新
+
+由于 Hibernate 将 ID 生成与实际的实体插入语句分开，因此使用标识符生成器的实体可能无法参与 JDBC 批量更新。Hibernate 在调用 persist() 方法期间发出插入语句，因此破坏了用于实体状态转换的事务性写入缓存语义。
+
+即使某些 JDBC 驱动程序允许在执行批量更新时获取关联的生成键，Hibernate 在这方面仍然需要改进。
+:::
+
+标识符生成器可以按如下方式进行映射：
+
+``` java
+@Entity @Table(name = "post")
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+}
+```
+
+以下示例演示了标识列语义如何绕过事务性写入缓存模型。尽管默认情况下禁用 JDBC 批处理，但为了比较标识符生成器和序列生成器的结果，此处已启用 JDBC 批处理。
+
+``` java
+doInJPA(entityManager -> {
+    for (int i = 0; i < batchSize; i++) {
+        entityManager.persist(new Post());
+    }
+    LOGGER.debug("Flush is triggered at commit-time");
+});
+```
+执行上述测试用例会生成以下输出。
+
+``` java
+INSERT INTO post (id) VALUES (DEFAULT)
+INSERT INTO post (id) VALUES (DEFAULT)
+
+DEBUG - Flush is triggered at commit-time
+```
+
+由于关联实体标识符只能在执行插入语句后才能确定，因此 Hibernate 会在刷新当前运行的持久化上下文之前触发实体状态转换。
+
+#### 9.2.3.2 序列生成器
+
+序列是一种生成连续数字的数据库对象。
+数据库序列由 SQL:2003 标准定义，并受 Oracle、SQL Server 2012 和 PostgreSQL 支持。与标识列相比，序列具有以下优势：
+* 同一个序列可用于填充多个列，甚至跨表使用。
+* 可以预先分配值以提高性能。
+* 序列允许增量步长，因此可以受益于应用程序级别的优化技术。
+* 由于序列调用可以与实际的插入语句分离，因此 Hibernate 不会禁用 JDBC 批量更新。
+
+为了演示标识符生成器和序列生成器之间的区别，我们将之前的示例更改为使用数据库序列。
+``` java
+@Entity @Table(name = "post")
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy=GenerationType.SEQUENCE)
+    private Long id;
+}
+```
+运行之前的测试用例会生成以下输出：
+
+``` 
+CALL NEXT VALUE FOR hibernate_sequence
+CALL NEXT VALUE FOR hibernate_sequence
+
+DEBUG - Flush is triggered at commit-time
+
+INSERT INTO post (id) VALUES (1, 2)”
+```
+
+执行 persist() 方法时，Hibernate 会调用关联的数据库序列并获取新持久化实体的标识符。实际的插入语句会延迟到刷新时执行，这使得 Hibernate 可以利用 JDBC 批量处理。
+
