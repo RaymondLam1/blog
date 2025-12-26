@@ -3110,3 +3110,169 @@ INSERT INTO post (id) VALUES (1, 2)”
 
 执行 persist() 方法时，Hibernate 会调用关联的数据库序列并获取新持久化实体的标识符。实际的插入语句会延迟到刷新时执行，这使得 Hibernate 可以利用 JDBC 批量处理。
 
+#### 9.2.3.3 表生成器
+
+由于标识符生成器与事务性写入缓存之间存在不匹配，JPA 提供了一种替代的类似序列的生成器，即使数据库本身不支持序列，该生成器也能正常工作。
+
+该生成器使用数据库表来存储最新的序列值，并采用行级锁定机制，以防止两个并发连接获取相同的标识符值。
+
+::: info
+避免事务性行级锁定
+
+数据库序列是一个非事务性对象，因为序列值的分配发生在与请求新标识符的数据库连接关联的事务上下文之外。数据库序列使用专用锁来防止并发事务获取相同的值，但锁会在计数器递增后立即释放。这种设计确保即使多个并发事务同时使用序列，也能最大限度地减少争用。
+
+使用数据库表作为序列具有挑战性，因为为了防止两个事务获取相同的序列值，必须使用行级锁定。然而，与序列对象锁不同，行级锁是事务性的，一旦获取，只有在当前事务结束（提交或回滚）后才能释放。这将导致严重的扩展性问题，因为长时间运行的事务会阻止任何其他事务获取新的序列值。
+
+为了解决这个限制，JPA 使用单独的数据库事务来获取新的序列值。这样，与递增序列计数器值相关的行级锁可以在序列更新事务结束后立即释放。
+
+对于本地事务，每次新的事务都需要获取一个新的数据库连接，并在执行序列处理逻辑后提交该连接。这会给底层连接池带来额外的压力，尤其是在数据库连接竞争已经非常激烈的情况下。
+
+在 JTA 环境中，当前正在运行的事务必须暂停，并在单独的事务中获取序列值。JTA 事务管理器需要执行额外的工作来处理事务上下文切换，这也会影响应用程序的整体性能。
+
+如果没有任何应用程序级别的优化，如果序列逻辑被频繁调用，行级锁定方法可能会成为性能瓶颈。
+
+:::
+
+以上述示例为例，这次使用表生成器：
+``` java
+@Entity @Table(name = "post")
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy=GenerationType.TABLE)
+    private Long id;
+}   
+```
+
+插入新帖子后，会得到以下输出：
+
+```
+SELECT tbl.next_val 
+FROM hibernate_sequences tbl 
+WHERE tbl.sequence_name=default 
+FOR UPDATE
+
+INSERT INTO hibernate_sequences (sequence_name, next_val) 
+VALUES (default, 1)
+
+UPDATE hibernate_sequences SET next_val=2 
+WHERE next_val=1 AND sequence_name=default
+
+SELECT tbl.next_val 
+FROM hibernate_sequences tbl 
+WHERE tbl.sequence_name=default 
+FOR UPDATE
+
+UPDATE hibernate_sequences SET next_val=3  
+WHERE next_val=2 AND sequence_name=default
+
+DEBUG - Flush is triggered at commit-time
+
+INSERT INTO post (id) values (1, 2)”
+```
+
+表生成器受益于 JDBC 批处理，但每次表序列更新都需要三个步骤：
+* 执行锁定语句，以确保不会为两个并发事务分配相同的序列值。
+* 在数据访问层递增当前值。
+* 将新值保存回数据库，并提交辅助事务以释放行级锁。
+
+与可以在单个请求中递增序列的标识列和序列不同，表生成器会带来显著的性能开销。因此，Hibernate 提供了一系列优化器，可以提高序列生成器和表生成器的性能。
+
+尽管表生成器是一种可移植的标识符生成策略，但它引入了可序列化执行（行级锁定），这会影响可伸缩性。与这种应用程序级别的序列生成技术相比，标识列和序列针对高并发场景进行了高度优化，因此应该是首选方案。
+
+#### 9.2.3.4 优化器
+
+如前所述，序列生成器和表标识符生成器都有多种实现，可以提高标识符生成过程的性能。序列生成器和表生成器可以分为两类：
+
+* 旧版实现（自 Hibernate 5.0 起已弃用），例如 SequenceGenerator、SequenceHiLoGenerator 和 MultipleHiLoPerTableGenerator。
+* 更新、更高效的实现，例如 SequenceStyleGenerator 和 TableGenerator。
+
+这两类实现不兼容，应用程序开发人员必须选择旧版标识符或增强型标识符。在 Hibernate 5.0 之前，默认提供旧版标识符生成器，​​应用程序开发人员可以通过设置以下配置属性切换到更新的生成器：
+
+``` property
+<property name="hibernate.id.new_generator_mappings" value="true"/>
+```
+
+Hibernate 5 已决定放弃对旧版标识符的支持，并默认使用增强型标识符。
+
+在旧版标识符生成器中，SequenceGenerator 没有提供任何优化，因为每个新的标识符值都需要调用底层数据库序列。另一方面，SequenceHiLoGenerator 和 MultipleHiLoPerTableGenerator 提供了一种高低位优化机制，旨在减少对数据库服务器的调用次数。尽管这些生成器已被弃用，但旧版高低位算法对于较新的标识符生成器仍然是一种有效的优化器。
+
+9.2.3.4.1 高/低位算法
+
+高/低位算法将序列域划分为多个高位组。高位值同步分配，每个高位组被赋予最大数量的低位条目，这些低位条目可以离线分配，而无需担心标识符值冲突。
+
+![alt text](assets/high-performance_java_persistence/image-38.png)
+
+1. 高位令牌由数据库序列或表生成器分配，因此可以保证两次连续调用会获得单调递增的值。
+2. 一旦获取到高位令牌，增量大小（n - 低位条目的数量）就定义了事务可以安全分配的标识符值范围。标识符范围由以下区间限定：[高位值 * n, 高位值 * n + n - 1]，分配过程如下：
+
+* 当前组的值从 高位值 * n 开始
+* 低位值取自以下区间：[0, n - 1]
+* 将低位值添加到初始组值，即可获得唯一的标识符。
+
+3. 当所有低位值都用完后，会获取一个新的高位值，然后循环继续。
+
+以下示例展示了 hi/lo 算法在实践中的工作原理。实体映射如下：
+``` java
+@Entity
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "hilo")
+    @GenericGenerator(
+        name = "hilo",
+        strategy = "org.hibernate.id.enhanced.SequenceStyleGenerator",
+        parameters = {
+            @Parameter(name = "sequence_name", value = "sequence"),
+            @Parameter(name = "initial_value", value = "1"),
+            @Parameter(name = "increment_size", value = "3"),
+            @Parameter(name = "optimizer", value = "hilo")
+        }
+    )
+    private Long id;
+}
+```
+由于增量大小为 3，以下测试插入 4 个实体，以展示数据库序列调用的次数。
+``` java
+doInJPA(entityManager -> {
+    for(int i = 0; i < 4; i++) {
+        Post post = new Post();
+        entityManager.persist(post);
+    }
+});
+```
+运行上述测试会生成以下输出：
+```
+CALL NEXT VALUE FOR hilo_seqeunce
+CALL NEXT VALUE FOR hilo_seqeunce
+
+INSERT INTO post (id) VALUES (1)
+INSERT INTO post (id) VALUES (2)
+INSERT INTO post (id) VALUES (3)
+INSERT INTO post (id) VALUES (4)
+```
+
+第一次序列调用用于前三个值，第二次调用是在需要持久化第四个实体时生成的。事务所需的插入操作越多，减少数据库序列调用次数带来的性能提升就越显著。
+
+::: info
+遗憾的是，这种优化器存在一个主要限制。由于数据库序列只分配一组值，因此所有数据库客户端都必须了解此算法。如果数据库管理员需要在上述表中插入一行，则必须使用 hi/lo 算法来确定可以安全使用的值范围。
+
+因此，Hibernate 提供了其他与外部客户端兼容的优化器算法，这些客户端无需了解应用程序级别的优化技术。
+:::
+
+##### 9.2.3.4.2 默认序列标识符生成器
+
+JPA 标识符生成策略仅指定标识符类型，而不指定用于生成此类标识符的算法。
+
+对于序列生成器，考虑以下 JPA 映射：
+
+``` java
+@Id
+@GeneratedValue(generator = "sequence", strategy=GenerationType.SEQUENCE)
+@SequenceGenerator(name = "sequence", allocationSize = 3)
+private Long id;
+```
+
+当 hibernate.id.new_generator_mappings 配置属性为 false 时，Hibernate 会选择 SequenceHiLoGenerator。这是 Hibernate 3 和 4 的默认设置。传统的 SequenceHiLoGenerator 使用 hi/lo 算法，如果分配大小大于 1，则可能会影响数据库的互操作性（每次插入都必须遵循 hi/lo 算法规则）。如果上述配置属性为 true（Hibernate 5 的默认设置），则上述 JPA 映射将使用 SequenceStyleGenerator。
+
+与之前的版本不同，SequenceStyleGenerator 使用可配置的标识符优化器策略，应用程序开发人员甚至可以提供自己的优化实现。
