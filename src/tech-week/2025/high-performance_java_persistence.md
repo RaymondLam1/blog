@@ -3276,3 +3276,168 @@ private Long id;
 当 hibernate.id.new_generator_mappings 配置属性为 false 时，Hibernate 会选择 SequenceHiLoGenerator。这是 Hibernate 3 和 4 的默认设置。传统的 SequenceHiLoGenerator 使用 hi/lo 算法，如果分配大小大于 1，则可能会影响数据库的互操作性（每次插入都必须遵循 hi/lo 算法规则）。如果上述配置属性为 true（Hibernate 5 的默认设置），则上述 JPA 映射将使用 SequenceStyleGenerator。
 
 与之前的版本不同，SequenceStyleGenerator 使用可配置的标识符优化器策略，应用程序开发人员甚至可以提供自己的优化实现。
+
+##### 9.2.3.4.3 默认表标识符生成器
+
+与序列类似，JPA 表生成器映射可以使用传统生成器或增强型生成器，具体取决于当前的 Hibernate 配置设置：
+
+``` java
+@Id
+@GeneratedValue(generator = "table", strategy=GenerationType.TABLE)
+@TableGenerator(name = "table", allocationSize = 3)
+private Long id;
+```
+
+如果 `hibernate.id.new_generator_mappings` 配置属性为 `false`，则 Hibernate 将选择 `MultipleHiLoPerTableGenerator`。
+
+此生成器需要单个表来管理多个标识符，并且与 `SequenceHiLoGenerator` 一样，它默认也使用高/低算法。
+
+启用增强型标识符生成器后，Hibernate 将改用 `TableGenerator`，该生成器也可以配置优化器策略。
+
+对于增强型序列生成器和表标识符生成器，​​Hibernate 都内置了以下优化器：
+
+**表9.8：Hibernate标识符优化器**
+
+| 优化器类型 | 实现类 | 描述 |
+| :--- | :--- | :--- |
+| `none` | `NoopOptimizer` | 每个标识符都需要通过一次新的数据库往返查询来获取 |
+| `hi/lo` | `HiLoOptimizer` | 使用传统的 hi/lo 算法来分配标识符 |
+| `pooled` | `PooledOptimizer` | 这是 hi/lo 算法的一个增强版本，可与不了解此标识符生成机制的其他系统互操作 |
+| `pooled-lo` | `PooledLoOptimizer` | 这是 `pooled` 优化器的一个变体，其数据库序列值代表的是低值（lo）而非高值（hi） |
+
+默认情况下，SequenceStyleGenerator 和 TableGenerator 标识符生成器使用 pooled 优化器。如果将 hibernate.id.optimizer.pooled.prefer_lo 配置属性设置为 true，则 Hibernate 默认使用 pooled-lo 优化器。
+
+pooled 和 pooled-lo 都会将数据库序列值编码到标识符范围边界内，因此使用实际的数据库序列调用分配新值不会干扰标识符生成器的分配过程。
+
+##### 9.2.3.4.4 pooled 优化器
+
+pooled 优化器可以按如下方式配置：
+
+``` java
+@Entity
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "pooled")
+    @GenericGenerator(
+        name = "pooled",
+        strategy = "org.hibernate.id.enhanced.SequenceStyleGenerator",
+        parameters = {
+            @Parameter(name = "sequence_name", value = "sequence"),
+            @Parameter(name = "initial_value", value = "1"),
+            @Parameter(name = "increment_size", value = "3"),
+            @Parameter(name = "optimizer", value = "pooled")
+        }
+    )
+    private Long id;
+}
+```
+增量大小指定序列生成器在一次数据库往返后分配的值范围。虽然每次调用 persist 方法后都刷新持久化上下文效率较低，但在本测试中，刷新操作可以指示数据库序列调用的时间。
+
+``` java
+doInJPA(entityManager -> {    
+    for (int i = 0; i < 5; i++) {
+        entityManager.persist(new Post());
+        entityManager.flush();
+    }
+    entityManager.unwrap(Session.class).doWork(connection -> {
+        try(Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                "INSERT INTO post VALUES NEXT VALUE FOR sequence"
+            );
+        }
+    });
+    for (int i = 0; i < 3; i++) {
+        entityManager.persist(new Post());
+        entityManager.flush();
+    }
+});
+```
+
+![alt text](assets/high-performance_java_persistence/image-39.png)
+
+如果增量大小 (n) 是某个范围内的标识符数量，则池化优化器将使用以下公式生成标识符：
+
+![alt text](assets/high-performance_java_persistence/image-40.png)
+
+* 第一次序列调用生成最低值 (lo)，第二次序列调用确定最高值 (hi)，因此第一个标识符范围为 {2, 3, 4}。
+* 添加第 5 个实体时，池化优化器再次调用序列并获取下一个最高值 (hi)，下一个标识符范围为 {5, 6, 7}。
+* 插入第 5 个实体后，外部系统添加一条 post 行，并将序列调用返回的值赋给主键。
+* Hibernate 应用程序线程恢复运行，并插入标识符 6 和 7。
+* 第 8 个实体需要新的序列调用，因此分配了一个新的范围 {11, 12, 13}。
+
+##### 9.2.3.4.5 pooled-lo 优化器
+
+通过将之前的映射更改为使用 pooled-lo 优化器，标识符的生成方式将发生如下变化：
+
+![alt text](assets/high-performance_java_persistence/image-42.png)
+
+如果增量大小 (n) 是某个范围内的标识符数量，则 pooled-lo 优化器将使用以下公式生成标识符：
+
+![alt text](assets/high-performance_java_persistence/image-41.png)
+
+* 第一次序列调用生成 lo 值，因此第一个标识符范围为 {1, 2, 3}。
+* 添加第 4 个实体时，pooled-lo 优化器调用序列并获取下一个 lo 值，下一个标识符范围为 {4, 5, 6}。
+* 插入第 5 个实体后，外部系统添加一个 post 行，并将序列调用返回的值赋给主键。
+* Hibernate 应用程序线程恢复并插入标识符 6。
+* 第 7 个实体需要新的序列调用，因此分配了一个新的范围 {10, 11, 12}。
+
+#### 9.2.3.5 优化器性能提升
+
+为了直观地展示使用序列生成器和表生成器优化器带来的性能提升，以下测试测量了插入 50 个 POST 实体时，在增量大小分别为 1、5、10 和 50 的情况下，标识符分配时间的变化。
+
+##### 9.2.3.5.1 序列生成器性能提升
+
+当使用带有默认池化优化器的序列生成器时，记录到以下第 99 个百分位数：
+
+![alt text](assets/high-performance_java_persistence/image-43.png)
+
+::: info
+数据库序列速度很快，但即便如此，池化优化器仍然能够显著缩短标识符生成时间。
+
+对于写入密集型应用程序，需要根据单次事务中插入的行数来调整增量大小。
+:::
+
+##### 9.2.3.5.2 表生成器性能提升
+
+使用相同的测试套件对带有连接池优化器的表生成器进行测试，增量大小分别为 1、5、10 和 50。由于行级锁定和额外的数据库连接切换开销，表生成器的效率低于数据库序列。
+
+与数据库序列一样，连接池优化器成功减少了分配新实体标识符所需的时间。
+
+![alt text](assets/high-performance_java_persistence/image-44.png)
+
+#### 9.2.3.6 标识符生成器性能
+
+为了评估每个标识符生成器的并发开销，以下测试测量了在多个运行线程参与的情况下插入 100 个帖子实体所需的时间。JDBC 批处理已启用，连接池已调整为可容纳所需的最大数据库连接数（例如 32）。
+
+::: info
+实际上，应用程序可能不会配置如此多的数据库连接，并且表生成器获取连接的成本可能会更高。
+:::
+
+第一个被测的关系数据库系统支持标识列，因此值得测试标识符生成器和表生成器的性能对比。与之前的测试不同，本次测试测量的是插入所有实体的总耗时，而不仅仅是标识符分配的时间间隔。
+
+每次测试迭代都会通过分配更多需要执行相同数据库插入操作的工作线程来增加竞争。
+
+![alt text](assets/high-performance_java_persistence/image-45.png)
+
+即使无法利用 JDBC 批处理，标识生成器的性能仍然优于使用增量大小为 100 的池化优化器的表生成器。
+
+::: info
+使用的线程越多，表生成器的效率就越低。另一方面，标识列在并发事务方面具有更好的扩展性。
+
+即使不支持 JDBC 批处理，原生标识列仍然是一个有效的选择，而且未来 Hibernate 甚至可能支持对标识列进行批处理插入。
+:::
+
+序列生成器和表生成器之间的差距更大，因为与表生成器一样，序列生成器也可以利用池化优化器以及 JDBC 批处理插入。
+
+对支持序列的关系数据库运行相同的测试，记录到以下结果：
+
+![alt text](assets/high-performance_java_persistence/image-46.png)
+
+在并发性较高的环境中，表生成器的性能影响会变得明显，因为行级锁定和数据库连接切换会引入串行执行。
+
+::: info
+由于数据库序列使用轻量级同步机制，因此其扩展性优于行级锁定并发控制机制。
+
+数据库序列是 Hibernate 中最有效的标识符选择，它允许使用序列调用优化器，并且不会影响 JDBC 批处理。
+:::
