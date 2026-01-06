@@ -3510,6 +3510,147 @@ post 表与 post_comment 表之间存在一对多关系，因为一条 post 记�
 
 如前所述，JPA 实体关系图与一对多表关系完全对应。
 
+![alt text](assets/high-performance_java_persistence/image-48.png)
+
+![alt text](assets/high-performance_java_persistence/image-49.png)
+
 PostComment 实体没有映射 post_id 外键列，而是使用 @ManyToOne 关系与父实体 Post 关联。 PostComment 可以与现有的 Post 对象引用关联，也可以与 Post 实体一起获取。
 
+``` java
+@ManyToOne 
+@JoinColumn(name = "post_id")
+private Post post;
+```
+
 Hibernate 会将 @ManyToOne Post 对象引用的内部状态转换为 post_id 外键列的值。
+
+如果 @ManyToOne 属性设置为有效的 Post 实体引用：
+
+``` java
+Post post = entityManager.find(Post.class, 1L);
+PostComment comment = new PostComment("My review");
+comment.setPost(post);
+entityManager.persist(comment);
+```
+
+Hibernate 将生成一条插入语句，用关联的 Post 实体的标识符填充 post_id 列。
+
+``` sql
+INSERT INTO post_comment (post_id, review, id) VALUES (1, 'My review', 2)
+```
+如果之后将 Post 属性设置为 null：
+
+``` java
+comment.setPost(null);
+```
+
+post_id 列也将更新为 NULL 值：
+
+``` java
+UPDATE post_comment SET post_id = NULL, review = 'My review' WHERE id = 2
+```
+
+由于 @ManyToOne 关联直接控制外键，因此自动生成的 DML 语句非常高效。
+
+实际上，性能最佳的 JPA 关联总是依赖于子端将 JPA 状态转换为外键列值。
+
+这是 JPA 关系映射中最重要的规则之一，我们将在 @OneToMany、@OneToOne 甚至 @ManyToMany 关联中进一步强调这一点。
+
+## 10.3 @OneToMany
+
+虽然 @ManyToOne 关联是多对一表关系最自然的映射方式，但 @OneToMany 关联也可以反映这种数据库关系，但前提是它被用作双向映射。单向 @OneToMany 关联会使用一个额外的连接表，这不再符合多对一表关系的语义。
+
+### 10.3.1 双向 @OneToMany
+
+双向 @OneToMany 关联具有与之匹配的子端 @ManyToOne 映射，该映射控制底层的一对多表关系。父端被映射为子实体集合。
+
+![alt text](assets/high-performance_java_persistence/image-50.png)
+
+在双向关联中，只有一方可以控制底层表关系。对于双向 @OneToMany 映射，子端的 @ManyToOne 关联负责使外键列值与内存中的持久化上下文保持同步。这就是为什么双向 @OneToMany 关系必须定义 mappedBy 属性的原因，该属性表明它只是镜像子端的 @ManyToOne 映射。
+
+``` java
+@OneToMany(mappedBy = "post", cascade = CascadeType.ALL, orphanRemoval = true)
+private List<PostComment> comments = new ArrayList<>();
+```
+
+::: info
+即使子端负责将实体状态更改与数据库外键列值同步，双向关联也必须始终保持父端和子端同步。
+:::
+
+为了同步两端，提供父实体端的辅助方法来添加/删除子实体是一种实用的做法。
+
+``` java
+public void addComment(PostComment comment) {
+    comments.add(comment);
+    comment.setPost(this);
+}
+
+public void removeComment(PostComment comment) {
+    comments.remove(comment);
+    comment.setPost(null);
+}
+```
+
+使用双向关联的主要优势之一是实体状态转换可以从父实体级联到其子实体。在以下示例中，持久化父实体 Post 时，所有子实体 PostComment 也会被持久化。
+
+``` java
+Post post = new Post("First post");
+
+PostComment comment1 = new PostComment("My first review");
+post.addComment(comment1);
+PostComment comment2 = new PostComment("My second review");
+post.addComment(comment2);
+
+entityManager.persist(post);
+
+INSERT INTO post (title, id) VALUES ('First post', 1)
+INSERT INTO post_comment (post_id, review, id) VALUES (1, 'My first review', 2)
+INSERT INTO post_comment (post_id, review, id) VALUES (1, 'My second review', 3)
+```
+
+从父实体端的集合中删除 comment 时：
+
+``` java
+post.removeComment(comment1);
+```
+
+orphanRemoval 属性指示 Hibernate 对目标子实体生成删除 DML 语句：
+
+``` sql
+DELETE FROM post_comment WHERE id = 2
+```
+
+::: info
+基于相等性的实体删除
+
+用于删除子实体的辅助方法依赖于底层子对象的相等性来匹配需要删除的集合条目。
+
+如果应用程序开发人员不选择覆盖默认的 equals 和 hashCode 方法，则将使用基于 java.lang.Object 身份的相等性。这种方法的缺点是应用程序开发人员必须提供当前子集合中包含的子实体对象引用。
+
+有时，子实体在一个 Web 请求中加载，并保存在 HttpSession 或有状态企业 Java Bean 中。一旦加载子实体的持久化上下文关闭，该实体就会变为游离状态。
+如果子实体在新的 Web 请求中被发送进行删除，则必须将子实体重新附加或合并到当前的持久化上下文中。这样，如果父实体及其子实体一起加载，则删除操作将正常工作，因为要删除的子实体已经被管理并包含在子集合中。
+
+如果实体没有更改，则重新附加此子实体将是多余的，因此必须覆盖 equals 和 hashCode 方法，以基于唯一的业务键来表达相等性。如果子实体具有 @NaturalId 或唯一的属性集，则可以在此基础上实现 equals 和 hashCode 方法。假设 PostComment 实体具有以下两列，它们的组合构成唯一的业务键，则可以按如下方式实现相等性契约：
+
+``` java
+private String createdBy;
+
+@Temporal(TemporalType.TIMESTAMP)
+private Date createdOn = new Date();
+
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (o == null || getClass() != o.getClass()) return false;
+    PostComment that = (PostComment) o;
+    return Objects.equals(createdBy, that.createdBy) && 
+           Objects.equals(createdOn, that.createdOn);
+}
+
+@Override
+public int hashCode() {
+    return Objects.hash(createdBy, createdOn);
+}
+```
+:::
+
