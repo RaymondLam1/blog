@@ -3654,3 +3654,47 @@ public int hashCode() {
 ```
 :::
 
+::: info
+基于标识符的相等性
+
+java.lang.Object.equals 方法的 Javadoc 文档要求其相等性策略必须满足自反性、对称性、传递性和一致性。
+
+虽然前三个相等性属性（自反性、对称性、传递性）比较容易实现，尤其是在使用 java.util.Objects 的 equals 和 hashCode 工具类的情况下，但一致性则需要更加谨慎。
+
+对于 JPA 或 Hibernate 实体，一致性意味着在所有实体状态转换（例如，新建/瞬态、托管、游离、已删除）过程中，相等性结果都必须满足自反性、对称性和传递性。
+
+如果实体具有 @NaturalId 属性，那么确保一致性就比较简单，因为自然键即使在瞬态状态下也会被分配，并且该属性之后永远不会改变。但是，并非所有实体都具有可用于相等性检查的自然键，因此必须使用其他表列。
+
+幸运的是，大多数数据库表都有主键，可以唯一标识特定表中的每一行。唯一需要注意的是确保在所有实体状态转换过程中保持一致性。
+
+一个简单的实现示例如下：
+
+``` java
+@Entity
+public class Post {
+
+    @Id @GeneratedValue
+    private Long id;
+      
+    //Getters and setters omitted for brevity
+    
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Post)) return false;
+                return Objects.equals(id, ((Post) o).getId());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id);
+    }
+}
+```
+:::
+
+::: info
+
+
+:::
+
