@@ -3693,9 +3693,3 @@ public class Post {
 ```
 :::
 
-::: info
-
-
-:::
-
-
