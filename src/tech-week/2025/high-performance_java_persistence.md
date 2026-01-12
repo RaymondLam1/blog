@@ -2745,7 +2745,7 @@ get() 方法用于将 inet 字段映射到 IPv4 对象实例，而 set() 方法�
 Types.OTHER 用于映射 JDBC 不支持的数据库类型。
 :::
 
-::: java
+``` java
 
 public abstract class ImmutableType<T> implements UserType {
     private final Class<T> clazz;
@@ -2789,7 +2789,7 @@ public abstract class ImmutableType<T> implements UserType {
     protected abstract void set(PreparedStatement st, T value, int index,
         SessionImplementor session) throws SQLException;
 }
-:::
+```
 
 @Type 注解指示 Hibernate 使用 IPv4Type 来映射 IPv4 字段。
 
@@ -2834,7 +2834,7 @@ CREATE INDEX ON event USING gist (ip inet_ops)
 
 当 Hibernate 负责底层类型转换时，管理事件就变得非常简单。
 
-::: java
+``` java
 final AtomicReference<Event> eventHolder = new AtomicReference<>();
 
 doInJPA(entityManager -> {
@@ -2848,11 +2848,11 @@ doInJPA(entityManager -> {
     Event event = entityManager.find(Event.class, eventHolder.get().getId());
     event.setIp("192.168.0.123");
 });
-:::
+```
 
 运行前面的示例会生成以下 SQL 语句：
 
-::: sql
+``` sql
 INSERT INTO event (ip, id) VALUES (NULL(OTHER), 1)
 INSERT INTO event (ip, id) VALUES (`192.168.0.231`, 2)
 
@@ -2861,11 +2861,11 @@ FROM event e0_
 WHERE e0_.id = 2
 
 UPDATE event SET ip=`192.168.0.123` WHERE id = 2
-:::
+```
 
 使用特定于数据库的类型的一大优势是可以访问高级查询功能。由于 GiST 索引支持 inet_ops 运算符，因此可以使用以下查询来检查是否为给定子网生成了事件：
 
-::: java
+``` java
 Event matchingEvent = (Event) entityManager.createNativeQuery(
     "SELECT e.* " +
     "FROM event e " +
@@ -2875,7 +2875,7 @@ Event matchingEvent = (Event) entityManager.createNativeQuery(
 .getSingleResult();
 
 assertEquals("192.168.0.123", matchingEvent.getIp().getAddress());
-:::
+```
 
 ## 9.2 标识符
 
@@ -3697,4 +3697,5 @@ public class Post {
 
 
 :::
+
 
