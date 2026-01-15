@@ -3691,5 +3691,90 @@ public class Post {
     }
 }
 ```
+::: info
+
+基于标识符的相等性
+
+java.lang.Object.equals 方法的 Javadoc 文档要求其相等性策略必须满足自反性、对称性、传递性和一致性。
+
+虽然前三个相等性属性（自反性、对称性和传递性）比较容易实现，尤其是在使用 java.util.Objects 的 equals 和 hashCode 工具类的情况下，但一致性则需要更加谨慎。
+
+对于 JPA 或 Hibernate 实体，一致性意味着在所有实体状态转换（例如，新建/瞬态、托管、游离、已删除）过程中，相等性结果都必须满足自反性、对称性和传递性。
+
+如果实体具有 @NaturalId 属性，那么确保一致性就比较简单，因为自然键即使在瞬态状态下也会被分配，并且该属性之后永远不会改变。但是，并非所有实体都具有可用于相等性检查的自然键，因此必须使用其他表列。
+
+幸运的是，大多数数据库表都有主键，可以唯一标识特定表的每一行。唯一需要注意的是确保在所有实体状态转换过程中保持一致性。
+
+一个简单的实现如下所示：
+
+``` java
+@Entity
+public class Post {
+
+    @Id @GeneratedValue
+    private Long id;
+      
+    //Getters and setters omitted for brevity
+    
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Post)) return false;
+                return Objects.equals(id, ((Post) o).getId());
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id);
+    }
+}
+```
+
 :::
 
+::: info
+
+现在，运行以下测试用例：
+
+``` java
+Set<Post> tuples = new HashSet<>();
+tuples.add(entity);
+assertTrue(tuples.contains(entity));
+
+doInJPA(entityManager -> {
+    entityManager.persist(entity);
+    entityManager.flush();
+    assertTrue(tuples.contains(entity));
+});
+```
+
+最终的断言将会失败，因为该实体在新标识符值关联到与实体最初存储的 Set 集合不同的桶中，因此无法再在 Set 集合中找到该实体。
+
+为了解决这个问题，必须按如下方式修改 equals 和 hashCode 方法：
+
+``` java
+
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Post)) return false;
+    return id != null && id.equals(((Post) o).getId());
+}
+
+@Override
+public int hashCode() {
+    return 31;
+}
+```
+
+当实体标识符为 null 时，只有相同的对象引用才能保证相等。否则，任何瞬态对象都不等于任何其他瞬态或持久化对象。这就是为什么上面的 equals 方法在当前对象的标识符值为 null 时会跳过标识符检查的原因。
+
+使用常量 hashCode 值可以解决之前与 Set 或 Map 相关的桶问题，因为这次只会使用一个桶。虽然一般来说，对于大型对象集合，使用单个 Set 桶效率不高，但在这种特定情况下，这种解决方法是有效的，因为为了提高效率，托管集合应该比较小。否则，获取包含数千个实体的 @OneToMany Set 的成本将比单桶搜索的开销高出几个数量级。
+
+使用 List 时，常量 hashCode 值根本不是问题，而且对于双向集合，Hibernate 内部的 PersistentList 比 PersistentSet 更高效。
+
+:::
+
+::: info
+双向 @OneToMany 关联可以生成高效的 DML 语句，因为 @ManyToOne 映射负责维护表之间的关系。此外，由于它还能简化数据访问操作，因此当子记录数量相对较少时，双向 @OneToMany 关联值得考虑。
+:::
